@@ -116,7 +116,24 @@ ORDINAL_FEATURES = {
 }
 
 # Engineered features created in feature_engineering.py
-ENGINEERED_FEATURES = ["TotalSF", "HouseAge", "RemodAge", "TotalBath", "HasPool", "HasGarage", "HasFireplace"]
+ENGINEERED_FEATURES = [
+    "TotalSF",
+    "HouseAge",
+    "RemodAge",
+    "TotalBaths",
+    "IsRemodeled",
+    "QualityScore",
+    "HasPool",
+    "HasGarage",
+    "HasFireplace",
+]
+
+# Weighted stack served by POST /predict (dollar-scale blend after expm1).
+ENSEMBLE_WEIGHTS = {
+    "XGBoost": 0.50,
+    "LightGBM": 0.30,
+    "Ridge": 0.20,
+}
 
 ID_COLUMN = "Id"
 
@@ -149,6 +166,13 @@ MODEL_CONFIGS = {
         },
     },
     "XGBoost": {
+        "param_grid": {
+            "model__n_estimators": [300, 500],
+            "model__learning_rate": [0.03, 0.05, 0.1],
+            "model__max_depth": [3, 4, 5],
+        },
+    },
+    "LightGBM": {
         "param_grid": {
             "model__n_estimators": [300, 500],
             "model__learning_rate": [0.03, 0.05, 0.1],

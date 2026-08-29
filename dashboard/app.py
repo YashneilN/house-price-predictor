@@ -1,84 +1,123 @@
 """
-House Price Predictor — Streamlit Dashboard
+Ames Housing AI — Commercial Real Estate Valuation & Analytics Dashboard
 
-Main entry point. Streamlit's native multi-page app support picks up
-everything in pages/ automatically and lists them in the sidebar; this
-file just sets page config and shows a landing/overview screen.
+Main entry point and multi-page router with custom branded sidebar navigation,
+live service health telemetry, and zinc/slate dark UI theme.
 """
 
+from __future__ import annotations
+
 import os
+from pathlib import Path
 
 import requests
 import streamlit as st
 
+from dashboard.theme import apply_theme
+
+# Top-level page configuration
 st.set_page_config(
-    page_title="House Price Predictor",
+    page_title="Ames Housing AI",
     page_icon="🏠",
     layout="wide",
 )
+apply_theme()
 
-# API base URL, overridable via env var so the dashboard can point at a
-# deployed backend without code changes.
 API_BASE_URL = os.environ.get("API_BASE_URL", "http://localhost:8000")
 if "api_base_url" not in st.session_state:
     st.session_state["api_base_url"] = API_BASE_URL
 
-st.title("🏠 House Price Predictor")
-st.caption("Full-stack ML pipeline — FastAPI backend, scikit-learn/XGBoost models, live training dashboard")
-
+# ── Sidebar Branding Header ──────────────────────────────────────────────
 with st.sidebar:
-    st.header("⚙️ Settings")
-    st.session_state["api_base_url"] = st.text_input("API Base URL", value=st.session_state["api_base_url"])
-    st.divider()
     st.markdown(
-        "**Pages**\n\n"
-        "- 📝 Predict — get a price estimate\n"
-        "- 📈 Training Monitor — train models, watch live metrics\n"
-        "- 📊 EDA — explore the dataset\n\n"
-        "Use the sidebar navigation above to switch pages."
+        """
+        <div style="display: flex; align-items: center; gap: 12px; margin-top: -8px; margin-bottom: 8px;">
+            <div style="font-size: 2rem; line-height: 1;">🏠</div>
+            <div>
+                <div style="font-size: 1.15rem; font-weight: 700; color: #f8fafc; letter-spacing: -0.02em;">Ames Housing AI</div>
+                <div style="font-size: 0.75rem; color: #94a3b8; font-weight: 400;">Real Estate Valuation & Analytics</div>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
     )
+    st.divider()
 
-col1, col2, col3 = st.columns(3)
+# ── Navigation Pages Definition ──────────────────────────────────────────
+PAGES_DIR = Path(__file__).parent / "pages"
 
-try:
-    resp = requests.get(f"{st.session_state['api_base_url']}/health", timeout=3)
-    healthy = resp.ok
-    model_loaded = resp.json().get("model_loaded", False) if healthy else False
-except requests.exceptions.RequestException:
-    healthy = False
-    model_loaded = False
-
-with col1:
-    st.metric("API Status", "🟢 Online" if healthy else "🔴 Offline")
-with col2:
-    st.metric("Model Status", "✅ Trained" if model_loaded else "⚠️ Not trained yet")
-with col3:
-    st.metric("Backend", st.session_state["api_base_url"])
-
-st.divider()
-
-if not healthy:
-    st.error(
-        f"Can't reach the FastAPI backend at `{st.session_state['api_base_url']}`. "
-        "Start it with:\n\n```bash\nuvicorn api.main:app --reload\n```"
-    )
-elif not model_loaded:
-    st.warning(
-        "No trained model yet. Go to **Training Monitor** in the sidebar, add `train.csv` to "
-        "`data/raw/`, and click **Start Training**."
-    )
-else:
-    st.success("Backend is online and a model is loaded. Head to **Predict** to try it out, "
-               "or **EDA** to explore the dataset.")
-
-st.markdown(
-    """
-    ### How this works
-    1. **EDA** — explore the Ames Housing dataset: distributions, correlations, missing data.
-    2. **Training Monitor** — trigger training; a background job cross-validates and tunes
-       several models (Linear, Ridge, Lasso, Random Forest, Gradient Boosting, XGBoost), and
-       this page polls `GET /metrics` every 5 seconds to chart progress live.
-    3. **Predict** — fill in house features, get a predicted price with a confidence range
-       and the features that drove the prediction.
-    """
+overview_page = st.Page(
+    PAGES_DIR / "00_overview.py",
+    title="Overview",
+    icon="🏠",
+    default=True,
 )
+predict_page = st.Page(
+    PAGES_DIR / "01_predict.py",
+    title="Price Estimator",
+    icon="📊",
+)
+train_page = st.Page(
+    PAGES_DIR / "02_training.py",
+    title="Model Training",
+    icon="⚙️",
+)
+eda_page = st.Page(
+    PAGES_DIR / "03_eda.py",
+    title="Exploratory Data Analysis",
+    icon="📈",
+)
+
+pg = st.navigation([overview_page, predict_page, train_page, eda_page])
+
+# ── Sidebar Footer & Telemetry Metadata ──────────────────────────────────
+with st.sidebar:
+    st.divider()
+
+    # Telemetry health check
+    try:
+        resp = requests.get(f"{st.session_state['api_base_url']}/health", timeout=2)
+        api_connected = resp.ok
+    except Exception:
+        api_connected = False
+
+    if api_connected:
+        st.markdown(
+            """
+            <div style="display: flex; align-items: center; gap: 6px; font-size: 0.82rem; font-weight: 600; color: #10b981;">
+                <span style="font-size: 0.75rem;">🟢</span> API Connected
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+    else:
+        st.markdown(
+            """
+            <div style="display: flex; align-items: center; gap: 6px; font-size: 0.82rem; font-weight: 600; color: #ef4444;">
+                <span style="font-size: 0.75rem;">🔴</span> API Disconnected
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+    st.markdown(
+        """
+        <div style="background: #1e293b; border: 1px solid #334155; border-radius: 8px; padding: 10px; margin-top: 10px; font-size: 0.78rem;">
+            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                <span style="color: #94a3b8;">Model Type:</span>
+                <span style="color: #f8fafc; font-weight: 500;">Stacked Ensemble</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-bottom: 4px;">
+                <span style="color: #94a3b8;">Dataset:</span>
+                <span style="color: #f8fafc; font-weight: 500;">Ames Iowa Housing</span>
+            </div>
+            <div style="display: flex; justify-content: space-between; margin-top: 6px; padding-top: 6px; border-top: 1px solid #334155;">
+                <span style="color: #94a3b8;">Source Code:</span>
+                <a href="https://github.com/Yashneil/house-price-predictor" target="_blank" style="color: #6366f1; text-decoration: none; font-weight: 500;">GitHub ↗</a>
+            </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+
+pg.run()

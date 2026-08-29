@@ -6,7 +6,28 @@ from sklearn.linear_model import LinearRegression
 from sklearn.pipeline import Pipeline
 
 from ml.config import TARGET_COLUMN
+from ml.ensemble import StackedEnsemble
 from ml.feature_engineering import build_preprocessing_pipeline, log_transform_target
+
+
+@pytest.fixture
+def trained_ensemble():
+    """Three identical linear members labeled as the production stack."""
+    from tests.test_model_trainer import _make_synthetic_dataset
+
+    df = _make_synthetic_dataset(n_rows=60)
+    X = df.drop(columns=[TARGET_COLUMN])
+    y_log = log_transform_target(df[TARGET_COLUMN])
+
+    members = {}
+    for name in ("XGBoost", "LightGBM", "Ridge"):
+        pipeline = Pipeline(steps=[
+            ("preprocessing", build_preprocessing_pipeline()),
+            ("model", LinearRegression()),
+        ])
+        pipeline.fit(X, y_log)
+        members[name] = pipeline
+    return StackedEnsemble(models=members)
 
 
 @pytest.fixture
@@ -27,18 +48,18 @@ def trained_pipeline():
 
 
 @pytest.fixture
-def client(monkeypatch, tmp_path, trained_pipeline):
+def client(monkeypatch, tmp_path, trained_ensemble):
     """
-    TestClient wired to a fresh AppState with a real fitted pipeline
+    TestClient wired to a fresh AppState with a stacked ensemble
     pre-loaded, so we don't depend on disk artifacts or training having run.
     """
     from api.main import app
     from api import dependencies
 
     fresh_state = dependencies.AppState()
-    fresh_state.model = trained_pipeline
+    fresh_state.model = trained_ensemble
     fresh_state.model_metadata = {
-        "model_name": "LinearRegression",
+        "model_name": "StackedEnsemble",
         "metrics": {"cv_rmse_mean": 0.15},
     }
 
@@ -78,7 +99,17 @@ class TestPredictEndpoint:
         assert "predicted_price" in body
         assert "confidence_interval_low" in body
         assert "confidence_interval_high" in body
+        assert "sub_model_predictions" in body
+        assert set(body["sub_model_predictions"]) == {"XGBoost", "LightGBM", "Ridge"}
+        assert body["model_used"] == "StackedEnsemble"
         assert body["predicted_price"] > 0
+
+    def test_ensemble_is_weighted_blend_of_submodels(self, client):
+        test_client, _ = client
+        body = test_client.post("/predict", json=VALID_PREDICTION_PAYLOAD).json()
+        subs = body["sub_model_predictions"]
+        expected = 0.50 * subs["XGBoost"] + 0.30 * subs["LightGBM"] + 0.20 * subs["Ridge"]
+        assert body["predicted_price"] == pytest.approx(expected, rel=1e-4)
 
     def test_predict_confidence_interval_brackets_point_estimate(self, client):
         test_client, _ = client
@@ -140,7 +171,7 @@ class TestModelInfoEndpoint:
         resp = test_client.get("/model/info")
         body = resp.json()
         assert body["model_exists"] is True
-        assert body["model_name"] == "LinearRegression"
+        assert body["model_name"] == "StackedEnsemble"
 
     def test_model_info_when_no_model_loaded(self, client):
         test_client, state = client

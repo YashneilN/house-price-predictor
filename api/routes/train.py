@@ -15,6 +15,7 @@ from api.schemas import (
 )
 from ml.config import RAW_TRAIN_PATH
 from ml.data_loader import DataValidationError, load_raw_data
+from ml.ensemble import StackedEnsemble
 from ml.model_registry import save_model
 from ml.model_trainer import MetricsLogger, train_all_models
 
@@ -35,9 +36,12 @@ def _run_training_job(models: list[str] | None, state: AppState) -> None:
         best_result, best_pipeline = train_all_models(
             df, models_to_train=models, metrics_logger=_metrics_logger
         )
+        served_name = (
+            "StackedEnsemble" if isinstance(best_pipeline, StackedEnsemble) else best_result["model"]
+        )
         save_model(
             pipeline=best_pipeline,
-            model_name=best_result["model"],
+            model_name=served_name,
             metrics=best_result,
             hyperparameters=best_result.get("best_params", {}),
         )

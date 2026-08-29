@@ -14,8 +14,6 @@ import threading
 from datetime import datetime, timezone
 from typing import Any, Optional
 
-from sklearn.pipeline import Pipeline
-
 from ml.model_registry import ModelNotFoundError, load_metadata, load_model, model_exists
 
 logger = logging.getLogger(__name__)
@@ -24,7 +22,7 @@ logger = logging.getLogger(__name__)
 class AppState:
     def __init__(self) -> None:
         self._lock = threading.Lock()
-        self.model: Optional[Pipeline] = None
+        self.model: Optional[object] = None
         self.model_metadata: dict = {}
         self.predictions: list[dict[str, Any]] = []
         self._next_prediction_id = 1

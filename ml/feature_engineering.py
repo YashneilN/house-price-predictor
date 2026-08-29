@@ -23,14 +23,23 @@ from ml.config import (
 )
 
 
+def _col(X: pd.DataFrame, name: str) -> pd.Series:
+    """Return a numeric series for `name`, treating missing columns / NaNs as 0."""
+    if name not in X.columns:
+        return pd.Series(0, index=X.index, dtype=float)
+    return pd.to_numeric(X[name], errors="coerce").fillna(0)
+
+
 class FeatureCreator(BaseEstimator, TransformerMixin):
     """
     Creates derived features from raw columns.
 
-    - TotalSF       = TotalBsmtSF + 1stFlrSF + 2ndFlrSF
+    - TotalSF       = GrLivArea + TotalBsmtSF + 1stFlrSF + 2ndFlrSF
+    - TotalBaths    = FullBath + 0.5*HalfBath + BsmtFullBath + 0.5*BsmtHalfBath
     - HouseAge      = YrSold - YearBuilt
     - RemodAge      = YrSold - YearRemodAdd
-    - TotalBath     = FullBath + 0.5*HalfBath + BsmtFullBath + 0.5*BsmtHalfBath
+    - IsRemodeled   = 1 if YearRemodAdd != YearBuilt else 0
+    - QualityScore  = OverallQual * OverallCond
     - HasPool       = 1 if PoolArea > 0 else 0
     - HasGarage     = 1 if GarageArea > 0 else 0
     - HasFireplace  = 1 if Fireplaces > 0 else 0
@@ -45,21 +54,24 @@ class FeatureCreator(BaseEstimator, TransformerMixin):
         X = X.copy()
 
         X["TotalSF"] = (
-            X.get("TotalBsmtSF", 0).fillna(0)
-            + X.get("1stFlrSF", 0).fillna(0)
-            + X.get("2ndFlrSF", 0).fillna(0)
+            _col(X, "GrLivArea")
+            + _col(X, "TotalBsmtSF")
+            + _col(X, "1stFlrSF")
+            + _col(X, "2ndFlrSF")
         )
-        X["HouseAge"] = X.get("YrSold", 0) - X.get("YearBuilt", 0)
-        X["RemodAge"] = X.get("YrSold", 0) - X.get("YearRemodAdd", 0)
-        X["TotalBath"] = (
-            X.get("FullBath", 0).fillna(0)
-            + 0.5 * X.get("HalfBath", 0).fillna(0)
-            + X.get("BsmtFullBath", 0).fillna(0)
-            + 0.5 * X.get("BsmtHalfBath", 0).fillna(0)
+        X["HouseAge"] = _col(X, "YrSold") - _col(X, "YearBuilt")
+        X["RemodAge"] = _col(X, "YrSold") - _col(X, "YearRemodAdd")
+        X["TotalBaths"] = (
+            _col(X, "FullBath")
+            + 0.5 * _col(X, "HalfBath")
+            + _col(X, "BsmtFullBath")
+            + 0.5 * _col(X, "BsmtHalfBath")
         )
-        X["HasPool"] = (X.get("PoolArea", 0).fillna(0) > 0).astype(int)
-        X["HasGarage"] = (X.get("GarageArea", 0).fillna(0) > 0).astype(int)
-        X["HasFireplace"] = (X.get("Fireplaces", 0).fillna(0) > 0).astype(int)
+        X["IsRemodeled"] = (_col(X, "YearRemodAdd") != _col(X, "YearBuilt")).astype(int)
+        X["QualityScore"] = _col(X, "OverallQual") * _col(X, "OverallCond")
+        X["HasPool"] = (_col(X, "PoolArea") > 0).astype(int)
+        X["HasGarage"] = (_col(X, "GarageArea") > 0).astype(int)
+        X["HasFireplace"] = (_col(X, "Fireplaces") > 0).astype(int)
 
         # Ages can go negative if data entry errors exist (remod before build, etc).
         # Clip rather than drop so we don't lose rows at inference time.
@@ -114,8 +126,10 @@ def build_preprocessing_pipeline() -> Pipeline:
     3. ColumnTransformer -> impute + scale numerics, impute + one-hot categoricals,
                              impute ordinals (already numeric after step 2)
     """
-    numerical_cols = NUMERICAL_FEATURES + ["TotalSF", "HouseAge", "RemodAge", "TotalBath"]
-    binary_cols = ["HasPool", "HasGarage", "HasFireplace"]
+    numerical_cols = NUMERICAL_FEATURES + [
+        "TotalSF", "HouseAge", "RemodAge", "TotalBaths", "QualityScore",
+    ]
+    binary_cols = ["HasPool", "HasGarage", "HasFireplace", "IsRemodeled"]
     ordinal_cols = get_ordinal_columns()
 
     numeric_transformer = Pipeline(steps=[

@@ -29,8 +29,15 @@ try:
 except ImportError:  # pragma: no cover
     XGBOOST_AVAILABLE = False
 
+try:
+    from lightgbm import LGBMRegressor
+    LIGHTGBM_AVAILABLE = True
+except ImportError:  # pragma: no cover
+    LIGHTGBM_AVAILABLE = False
+
 from ml.config import (
     CV_FOLDS,
+    ENSEMBLE_WEIGHTS,
     METRICS_LOG_PATH,
     MODEL_CONFIGS,
     RANDOM_SEARCH_ITER,
@@ -38,11 +45,13 @@ from ml.config import (
     SEARCH_STRATEGY,
     TARGET_COLUMN,
 )
+from ml.ensemble import StackedEnsemble
 from ml.feature_engineering import (
     build_preprocessing_pipeline,
     inverse_log_transform,
     log_transform_target,
 )
+from ml.preprocessing import remove_training_outliers
 
 logger = logging.getLogger(__name__)
 
@@ -55,11 +64,14 @@ MODEL_CLASSES = {
 }
 if XGBOOST_AVAILABLE:
     MODEL_CLASSES["XGBoost"] = XGBRegressor
+if LIGHTGBM_AVAILABLE:
+    MODEL_CLASSES["LightGBM"] = LGBMRegressor
 
 MODEL_DEFAULT_KWARGS = {
     "RandomForest": {"random_state": RANDOM_STATE, "n_jobs": -1},
     "GradientBoosting": {"random_state": RANDOM_STATE},
     "XGBoost": {"random_state": RANDOM_STATE, "n_jobs": -1, "verbosity": 0},
+    "LightGBM": {"random_state": RANDOM_STATE, "n_jobs": -1, "verbosity": -1},
     "Ridge": {"random_state": RANDOM_STATE},
     "Lasso": {"random_state": RANDOM_STATE, "max_iter": 5000},
 }
@@ -243,10 +255,14 @@ def train_all_models(
     df: pd.DataFrame,
     models_to_train: list[str] | None = None,
     metrics_logger: MetricsLogger | None = None,
-) -> tuple[dict, Pipeline]:
+) -> tuple[dict, Pipeline | StackedEnsemble]:
     """
     Orchestrates training every configured model, logging progress as it goes,
-    and returns (best_result, best_fitted_pipeline).
+    and returns (best_result, served_estimator).
+
+    When XGBoost, LightGBM, and/or Ridge are among the fitted models, the
+    served estimator is a StackedEnsemble (0.50 / 0.30 / 0.20). Otherwise
+    the single best CV pipeline is served.
 
     `df` must include the target column (TARGET_COLUMN).
     """
@@ -257,15 +273,18 @@ def train_all_models(
     if not models_to_train:
         raise ValueError("No valid models to train. Check MODEL_CLASSES / requested model names.")
 
+    df = remove_training_outliers(df)
     X = df.drop(columns=[TARGET_COLUMN])
     y_log = log_transform_target(df[TARGET_COLUMN])
 
     metrics_logger.start(models_total=len(models_to_train))
 
     results = []
+    fitted: dict[str, Pipeline] = {}
     try:
         for model_name in models_to_train:
             result = train_single_model(model_name, X, y_log, metrics_logger)
+            fitted[model_name] = result.pop("_fitted_pipeline")
             results.append(result)
     except Exception as exc:  # noqa: BLE001 — surface any failure to the dashboard
         logger.exception("Training failed")
@@ -273,20 +292,40 @@ def train_all_models(
         raise
 
     best_result = min(results, key=lambda r: r["cv_rmse_mean"])
-    metrics_logger.finish(best_model=best_result["model"])
+    served_name = best_result["model"]
+    served: Pipeline | StackedEnsemble = fitted[served_name]
 
-    best_pipeline = best_result.pop("_fitted_pipeline")
-    for r in results:
-        r.pop("_fitted_pipeline", None)
+    ensemble_members = {name: fitted[name] for name in ENSEMBLE_WEIGHTS if name in fitted}
+    if len(ensemble_members) >= 2:
+        served = StackedEnsemble(models=ensemble_members)
+        served_name = "StackedEnsemble"
+        member_rmse = {
+            r["model"]: r["cv_rmse_mean"] for r in results if r["model"] in ensemble_members
+        }
+        weights = served._normalized_weights()
+        best_result = {
+            **best_result,
+            "ensemble_weights": weights,
+            "ensemble_members": list(ensemble_members.keys()),
+            "ensemble_member_cv_rmse": member_rmse,
+            "cv_rmse_mean": float(
+                sum(member_rmse[n] * weights.get(n, 0.0) for n in member_rmse)
+            ) if member_rmse else best_result["cv_rmse_mean"],
+        }
 
-    logger.info("Best model: %s (CV RMSE log-scale: %.4f)", best_result["model"], best_result["cv_rmse_mean"])
-    return best_result, best_pipeline
+    metrics_logger.finish(best_model=served_name)
+    logger.info(
+        "Serving %s (best single model by CV RMSE: %s, %.4f log-scale)",
+        served_name, min(results, key=lambda r: r["cv_rmse_mean"])["model"],
+        min(results, key=lambda r: r["cv_rmse_mean"])["cv_rmse_mean"],
+    )
+    return best_result, served
 
 
-def evaluate_on_holdout(pipeline: Pipeline, X_test: pd.DataFrame, y_test_actual: np.ndarray) -> dict:
+def evaluate_on_holdout(pipeline: Pipeline | StackedEnsemble, X_test: pd.DataFrame, y_test_actual: np.ndarray) -> dict:
     """Evaluate a fitted pipeline on real dollar-scale predictions (inverse log)."""
-    y_pred_log = pipeline.predict(X_test)
-    y_pred = inverse_log_transform(y_pred_log)
+    raw = np.asarray(pipeline.predict(X_test), dtype=float)
+    y_pred = raw if isinstance(pipeline, StackedEnsemble) else inverse_log_transform(raw)
 
     return {
         "rmse": float(np.sqrt(mean_squared_error(y_test_actual, y_pred))),

@@ -105,6 +105,12 @@ class PredictionResponse(BaseModel):
     confidence_interval_low: float
     confidence_interval_high: float
     top_feature_importances: dict[str, float] = Field(default_factory=dict)
+    sub_model_predictions: dict[str, float] = Field(
+        default_factory=dict,
+        description="Individual USD estimates from ensemble members (XGBoost, LightGBM, Ridge).",
+    )
+    ensemble_weights: dict[str, float] = Field(default_factory=dict)
+    price_per_sqft: float = 0.0
     model_used: str
     timestamp: datetime
 

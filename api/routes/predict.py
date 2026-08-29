@@ -15,6 +15,7 @@ from api.schemas import (
     PredictionRequest,
     PredictionResponse,
 )
+from ml.ensemble import StackedEnsemble
 from ml.feature_engineering import inverse_log_transform
 
 logger = logging.getLogger(__name__)
@@ -37,18 +38,18 @@ def predict(request: PredictionRequest, state: AppState = Depends(get_app_state)
     input_df = pd.DataFrame([input_dict])
 
     try:
-        pred_log = state.model.predict(input_df)[0]
+        predicted_price, sub_preds, ensemble_weights = _predict_usd(state.model, input_df)
     except Exception as exc:  # noqa: BLE001
         logger.exception("Prediction failed")
         raise HTTPException(status_code=500, detail=f"Prediction failed: {exc}") from exc
 
-    predicted_price = float(inverse_log_transform(np.array([pred_log]))[0])
-
-    # Build a simple confidence interval on the log scale using the model's
-    # own CV RMSE (from metadata) where available.
     cv_rmse_log = state.model_metadata.get("metrics", {}).get("cv_rmse_mean", DEFAULT_LOG_RMSE)
+    pred_log = float(np.log1p(max(predicted_price, 0.0)))
     low = float(inverse_log_transform(np.array([pred_log - 1.96 * cv_rmse_log]))[0])
     high = float(inverse_log_transform(np.array([pred_log + 1.96 * cv_rmse_log]))[0])
+
+    living = float(request.GrLivArea) or 1.0
+    price_per_sqft = predicted_price / living
 
     top_importances = _extract_feature_importances(state)
 
@@ -62,12 +63,19 @@ def predict(request: PredictionRequest, state: AppState = Depends(get_app_state)
         },
     )
 
+    model_used = state.model_metadata.get("model_name", "unknown")
+    if isinstance(state.model, StackedEnsemble):
+        model_used = "StackedEnsemble"
+
     return PredictionResponse(
         predicted_price=round(predicted_price, 2),
         confidence_interval_low=round(low, 2),
         confidence_interval_high=round(high, 2),
         top_feature_importances=top_importances,
-        model_used=state.model_metadata.get("model_name", "unknown"),
+        sub_model_predictions={k: round(float(v), 2) for k, v in sub_preds.items()},
+        ensemble_weights=ensemble_weights,
+        price_per_sqft=round(price_per_sqft, 2),
+        model_used=model_used,
         timestamp=record["timestamp"],
     )
 
@@ -80,6 +88,20 @@ def prediction_history(limit: int = 50, state: AppState = Depends(get_app_state)
     return PredictionHistoryResponse(predictions=items, count=len(items))
 
 
+def _predict_usd(model, input_df: pd.DataFrame) -> tuple[float, dict[str, float], dict[str, float]]:
+    """Return (ensemble_or_single USD, sub-model USD map, weights)."""
+    if isinstance(model, StackedEnsemble):
+        components = model.predict_components(input_df)
+        sub_preds = {name: float(vals[0]) for name, vals in components.items()}
+        predicted = float(model.predict(input_df)[0])
+        return predicted, sub_preds, model._normalized_weights()
+
+    pred_log = model.predict(input_df)[0]
+    predicted = float(inverse_log_transform(np.array([pred_log]))[0])
+    name = type(model.named_steps["model"]).__name__ if hasattr(model, "named_steps") else "model"
+    return predicted, {name: predicted}, {}
+
+
 def _extract_feature_importances(state: AppState, top_n: int = 10) -> dict[str, float]:
     """
     Best-effort extraction of feature importances from the fitted pipeline,
@@ -87,8 +109,12 @@ def _extract_feature_importances(state: AppState, top_n: int = 10) -> dict[str, 
     anything about the pipeline shape isn't as expected (never raises).
     """
     try:
-        model = state.model.named_steps["model"]
-        preprocessing = state.model.named_steps["preprocessing"]
+        estimator = state.model
+        if isinstance(estimator, StackedEnsemble):
+            estimator = estimator.named_estimator()
+
+        model = estimator.named_steps["model"]
+        preprocessing = estimator.named_steps["preprocessing"]
         column_transformer = preprocessing.named_steps["column_transformer"]
         feature_names = column_transformer.get_feature_names_out()
 

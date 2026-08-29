@@ -9,6 +9,7 @@ from ml.feature_engineering import (
     inverse_log_transform,
     log_transform_target,
 )
+from ml.preprocessing import remove_training_outliers
 
 
 @pytest.fixture
@@ -97,12 +98,12 @@ def sample_raw_df():
 class TestFeatureCreator:
     def test_total_sf_is_sum_of_floor_areas(self, sample_raw_df):
         out = FeatureCreator().fit_transform(sample_raw_df)
-        assert out.loc[0, "TotalSF"] == 800 + 1000 + 500
+        assert out.loc[0, "TotalSF"] == 1500 + 800 + 1000 + 500
 
     def test_total_sf_handles_nan_basement(self, sample_raw_df):
         out = FeatureCreator().fit_transform(sample_raw_df)
         # Row 1 has NaN TotalBsmtSF -> should be treated as 0, not propagate NaN
-        assert out.loc[1, "TotalSF"] == 900 + 0
+        assert out.loc[1, "TotalSF"] == 900 + 0 + 900 + 0
 
     def test_house_age_computed_correctly(self, sample_raw_df):
         out = FeatureCreator().fit_transform(sample_raw_df)
@@ -117,7 +118,16 @@ class TestFeatureCreator:
     def test_total_bath_weights_half_baths(self, sample_raw_df):
         out = FeatureCreator().fit_transform(sample_raw_df)
         # Row 0: FullBath=2, HalfBath=1, BsmtFullBath=0, BsmtHalfBath=0 -> 2.5
-        assert out.loc[0, "TotalBath"] == pytest.approx(2.5)
+        assert out.loc[0, "TotalBaths"] == pytest.approx(2.5)
+
+    def test_is_remodeled_flag(self, sample_raw_df):
+        out = FeatureCreator().fit_transform(sample_raw_df)
+        assert out.loc[0, "IsRemodeled"] == 1
+        assert out.loc[1, "IsRemodeled"] == 0
+
+    def test_quality_score_is_product(self, sample_raw_df):
+        out = FeatureCreator().fit_transform(sample_raw_df)
+        assert out.loc[0, "QualityScore"] == 7 * 5
 
     def test_has_pool_binary_flag(self, sample_raw_df):
         out = FeatureCreator().fit_transform(sample_raw_df)
@@ -187,3 +197,16 @@ class TestTargetTransform:
         raw_skew = prices.skew()
         log_skew = pd.Series(log_transform_target(prices)).skew()
         assert abs(log_skew) < abs(raw_skew)
+
+
+class TestOutlierRemoval:
+    def test_drops_de_cock_outliers(self):
+        df = pd.DataFrame({
+            "GrLivArea": [1500, 4500, 4200],
+            "SalePrice": [180000, 160000, 500000],
+        })
+        cleaned = remove_training_outliers(df)
+        assert len(cleaned) == 2
+        assert 4500 not in set(cleaned["GrLivArea"])
+        assert 4200 in set(cleaned["GrLivArea"])
+

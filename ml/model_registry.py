@@ -18,6 +18,7 @@ import joblib
 from sklearn.pipeline import Pipeline
 
 from ml.config import MODEL_ARTIFACT_PATH, MODEL_METADATA_PATH, MODELS_DIR
+from ml.ensemble import StackedEnsemble
 
 logger = logging.getLogger(__name__)
 
@@ -27,7 +28,7 @@ class ModelNotFoundError(Exception):
 
 
 def save_model(
-    pipeline: Pipeline,
+    pipeline: Pipeline | StackedEnsemble,
     model_name: str,
     metrics: dict[str, Any],
     features_used: list[str] | None = None,
@@ -50,8 +51,8 @@ def save_model(
     logger.info("Saved model '%s' to %s", model_name, MODEL_ARTIFACT_PATH)
 
 
-def load_model() -> Pipeline:
-    """Load the current best pipeline from disk. Raises if none exists."""
+def load_model() -> Pipeline | StackedEnsemble:
+    """Load the current best pipeline (or stacked ensemble) from disk. Raises if none exists."""
     if not MODEL_ARTIFACT_PATH.exists():
         raise ModelNotFoundError(
             f"No trained model found at {MODEL_ARTIFACT_PATH}. Train a model first via POST /train."
