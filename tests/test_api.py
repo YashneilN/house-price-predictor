@@ -102,7 +102,7 @@ class TestPredictEndpoint:
         assert "sub_model_predictions" in body
         assert set(body["sub_model_predictions"]) == {"XGBoost", "LightGBM", "Ridge"}
         assert body["model_used"] == "StackedEnsemble"
-        assert body["predicted_price"] > 0
+        assert body["predicted_price"] > 10_000, "Price should be rescaled to USD, not in log-space"
 
     def test_ensemble_is_weighted_blend_of_submodels(self, client):
         test_client, _ = client
