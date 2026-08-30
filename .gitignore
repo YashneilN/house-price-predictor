@@ -27,3 +27,6 @@ models/*
 
 # Streamlit
 .streamlit/secrets.toml
+*_PROMPT.md
+AGENT_INSTRUCTIONS.md
+PARKING_LOT.md

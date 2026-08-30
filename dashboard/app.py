@@ -113,7 +113,7 @@ with st.sidebar:
             </div>
             <div style="display: flex; justify-content: space-between; margin-top: 6px; padding-top: 6px; border-top: 1px solid #334155;">
                 <span style="color: #94a3b8;">Source Code:</span>
-                <a href="https://github.com/Yashneil/house-price-predictor" target="_blank" style="color: #6366f1; text-decoration: none; font-weight: 500;">GitHub ↗</a>
+                <a href="https://github.com/YashneilN" target="_blank" style="color: #6366f1; text-decoration: none; font-weight: 500;">GitHub ↗</a>
             </div>
         </div>
         """,
