@@ -101,18 +101,24 @@ class PredictionRequest(BaseModel):
 
 
 class PredictionResponse(BaseModel):
-    predicted_price: float
-    confidence_interval_low: float
-    confidence_interval_high: float
-    top_feature_importances: dict[str, float] = Field(default_factory=dict)
+    predicted_price: float = Field(..., description="Final ensemble predicted house price in USD.")
+    confidence_interval_low: float = Field(..., description="Lower bound of 95% confidence interval in USD.")
+    confidence_interval_high: float = Field(..., description="Upper bound of 95% confidence interval in USD.")
+    top_feature_importances: dict[str, float] = Field(
+        default_factory=dict,
+        description="Top predictive features and their relative importance scores.",
+    )
     sub_model_predictions: dict[str, float] = Field(
         default_factory=dict,
-        description="Individual USD estimates from ensemble members (XGBoost, LightGBM, Ridge).",
+        description="Individual USD estimates from ensemble members (e.g., XGBoost, LightGBM, Ridge).",
     )
-    ensemble_weights: dict[str, float] = Field(default_factory=dict)
-    price_per_sqft: float = 0.0
-    model_used: str
-    timestamp: datetime
+    ensemble_weights: dict[str, float] = Field(
+        default_factory=dict,
+        description="Normalized weights applied to member model predictions in the ensemble.",
+    )
+    price_per_sqft: float = Field(0.0, description="Estimated price per square foot of living area.")
+    model_used: str = Field(..., description="Name or type of model used for the prediction.")
+    timestamp: datetime = Field(..., description="Timestamp when the prediction was generated.")
 
 
 class PredictionHistoryItem(BaseModel):
