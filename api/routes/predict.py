@@ -102,31 +102,103 @@ def _predict_usd(model, input_df: pd.DataFrame) -> tuple[float, dict[str, float]
     return predicted, {name: predicted}, {}
 
 
+def _extract_pipeline_feature_importances(pipeline) -> dict[str, float] | None:
+    """Extract normalized feature importances as {feature_name: importance} from a pipeline."""
+    try:
+        if hasattr(pipeline, "named_steps"):
+            model = pipeline.named_steps.get("model")
+            preprocessing = pipeline.named_steps.get("preprocessing")
+        else:
+            model = pipeline
+            preprocessing = None
+
+        if model is None:
+            return None
+
+        if hasattr(model, "feature_importances_"):
+            raw_imp = np.asarray(model.feature_importances_, dtype=float)
+        elif hasattr(model, "coef_"):
+            raw_imp = np.abs(np.asarray(model.coef_, dtype=float).ravel())
+        else:
+            return None
+
+        feature_names = None
+        if preprocessing is not None:
+            if hasattr(preprocessing, "named_steps") and "column_transformer" in preprocessing.named_steps:
+                col_tf = preprocessing.named_steps["column_transformer"]
+                if hasattr(col_tf, "get_feature_names_out"):
+                    feature_names = col_tf.get_feature_names_out()
+            elif hasattr(preprocessing, "get_feature_names_out"):
+                feature_names = preprocessing.get_feature_names_out()
+
+        if feature_names is None:
+            if hasattr(model, "feature_names_in_"):
+                feature_names = np.asarray(model.feature_names_in_)
+            else:
+                feature_names = np.array([f"feature_{i}" for i in range(len(raw_imp))])
+
+        if len(feature_names) != len(raw_imp):
+            return None
+
+        total = float(np.sum(raw_imp))
+        norm_imp = (raw_imp / total) if total > 0 else raw_imp
+
+        return {str(name): float(val) for name, val in zip(feature_names, norm_imp)}
+    except Exception:  # noqa: BLE001
+        logger.debug("Failed to extract feature importances from pipeline", exc_info=True)
+        return None
+
+
 def _extract_feature_importances(state: AppState, top_n: int = 10) -> dict[str, float]:
     """
-    Best-effort extraction of feature importances from the fitted pipeline,
-    for tree-based models. Returns an empty dict for linear models or if
-    anything about the pipeline shape isn't as expected (never raises).
+    Best-effort extraction of feature importances from the fitted pipeline or ensemble.
+
+    For StackedEnsemble models, computes a weighted blend of individual member
+    model feature importances (normalized by model weights), falling back
+    gracefully if any member model lacks importances.
+    For single-model pipelines, extracts normalized importances directly.
+    Returns an empty dict if importances cannot be extracted (never raises).
     """
     try:
         estimator = state.model
-        if isinstance(estimator, StackedEnsemble):
-            estimator = estimator.named_estimator()
-
-        model = estimator.named_steps["model"]
-        preprocessing = estimator.named_steps["preprocessing"]
-        column_transformer = preprocessing.named_steps["column_transformer"]
-        feature_names = column_transformer.get_feature_names_out()
-
-        if hasattr(model, "feature_importances_"):
-            importances = model.feature_importances_
-        elif hasattr(model, "coef_"):
-            importances = np.abs(model.coef_)
-        else:
+        if estimator is None:
             return {}
 
-        order = np.argsort(importances)[::-1][:top_n]
-        return {str(feature_names[i]): float(importances[i]) for i in order}
+        if isinstance(estimator, StackedEnsemble):
+            weights = estimator._normalized_weights() if hasattr(estimator, "_normalized_weights") else {}
+            member_importances: dict[str, dict[str, float]] = {}
+            for name, pipeline in estimator.models.items():
+                imp = _extract_pipeline_feature_importances(pipeline)
+                if imp is not None:
+                    member_importances[name] = imp
+
+            if not member_importances:
+                return {}
+
+            total_weight = sum(weights.get(name, 1.0) for name in member_importances)
+            if total_weight > 0:
+                norm_model_weights = {
+                    name: weights.get(name, 1.0) / total_weight for name in member_importances
+                }
+            else:
+                n = len(member_importances)
+                norm_model_weights = {name: 1.0 / n for name in member_importances}
+
+            blended: dict[str, float] = {}
+            for name, imp_dict in member_importances.items():
+                w = norm_model_weights[name]
+                for feat, score in imp_dict.items():
+                    blended[feat] = blended.get(feat, 0.0) + w * score
+
+            order = sorted(blended.items(), key=lambda item: item[1], reverse=True)[:top_n]
+            return {str(feat): round(float(score), 6) for feat, score in order}
+
+        # Single pipeline fallback
+        imp_dict = _extract_pipeline_feature_importances(estimator)
+        if not imp_dict:
+            return {}
+        order = sorted(imp_dict.items(), key=lambda item: item[1], reverse=True)[:top_n]
+        return {str(feat): round(float(score), 6) for feat, score in order}
     except Exception:  # noqa: BLE001 — feature importance is a nice-to-have, never block prediction
         logger.debug("Could not extract feature importances", exc_info=True)
         return {}

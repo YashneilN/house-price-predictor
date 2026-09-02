@@ -103,6 +103,12 @@ class TestPredictEndpoint:
         assert set(body["sub_model_predictions"]) == {"XGBoost", "LightGBM", "Ridge"}
         assert body["model_used"] == "StackedEnsemble"
         assert body["predicted_price"] > 10_000, "Price should be rescaled to USD, not in log-space"
+        assert "top_feature_importances" in body
+        assert len(body["top_feature_importances"]) > 0
+        assert len(body["top_feature_importances"]) <= 10
+        scores = list(body["top_feature_importances"].values())
+        assert scores == sorted(scores, reverse=True)
+        assert all(s >= 0 for s in scores)
 
     def test_ensemble_is_weighted_blend_of_submodels(self, client):
         test_client, _ = client
@@ -116,6 +122,73 @@ class TestPredictEndpoint:
         resp = test_client.post("/predict", json=VALID_PREDICTION_PAYLOAD)
         body = resp.json()
         assert body["confidence_interval_low"] <= body["predicted_price"] <= body["confidence_interval_high"]
+
+    def test_feature_importances_weighted_blend_matches_weights(self, client):
+        test_client, state = client
+        resp = test_client.post("/predict", json=VALID_PREDICTION_PAYLOAD)
+        assert resp.status_code == 200
+        body = resp.json()
+        importances = body["top_feature_importances"]
+        assert isinstance(importances, dict)
+        assert len(importances) > 0
+
+        # In our trained_ensemble fixture, all 3 models are identical LinearRegression models.
+        # Check that individual model normalized coefficients match the blended scores.
+        from api.routes.predict import _extract_pipeline_feature_importances
+
+        single_imp = _extract_pipeline_feature_importances(state.model.models["XGBoost"])
+        for feat, score in list(importances.items())[:5]:
+            assert score == pytest.approx(single_imp[feat], rel=1e-3)
+
+    def test_feature_importances_graceful_fallback_when_member_lacks_importance(self, client):
+        from sklearn.dummy import DummyRegressor
+        from tests.test_model_trainer import _make_synthetic_dataset
+
+        test_client, state = client
+        df = _make_synthetic_dataset(n_rows=60)
+        X = df.drop(columns=[TARGET_COLUMN])
+        y_log = log_transform_target(df[TARGET_COLUMN])
+
+        dummy_pipe = Pipeline(steps=[
+            ("preprocessing", build_preprocessing_pipeline()),
+            ("model", DummyRegressor()),
+        ])
+        dummy_pipe.fit(X, y_log)
+
+        # Replace LightGBM with DummyRegressor (lacks coef_ and feature_importances_)
+        new_models = dict(state.model.models)
+        new_models["LightGBM"] = dummy_pipe
+        state.model = StackedEnsemble(models=new_models)
+
+        resp = test_client.post("/predict", json=VALID_PREDICTION_PAYLOAD)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert "top_feature_importances" in body
+        assert len(body["top_feature_importances"]) > 0
+
+    def test_feature_importances_empty_when_no_members_have_importances(self, client):
+        from sklearn.dummy import DummyRegressor
+        from tests.test_model_trainer import _make_synthetic_dataset
+
+        test_client, state = client
+        df = _make_synthetic_dataset(n_rows=60)
+        X = df.drop(columns=[TARGET_COLUMN])
+        y_log = log_transform_target(df[TARGET_COLUMN])
+
+        dummy_models = {}
+        for name in ("XGBoost", "LightGBM", "Ridge"):
+            pipe = Pipeline(steps=[
+                ("preprocessing", build_preprocessing_pipeline()),
+                ("model", DummyRegressor()),
+            ])
+            pipe.fit(X, y_log)
+            dummy_models[name] = pipe
+        state.model = StackedEnsemble(models=dummy_models)
+
+        resp = test_client.post("/predict", json=VALID_PREDICTION_PAYLOAD)
+        assert resp.status_code == 200
+        body = resp.json()
+        assert body["top_feature_importances"] == {}
 
     def test_predict_rejects_invalid_overall_qual(self, client):
         test_client, _ = client
